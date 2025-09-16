@@ -1,0 +1,46 @@
+# Training artifacts
+logs/
+checkpoints_production/
+wandb/
+
+# Data directories
+rrweb_data/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# Model checkpoints
+*.pt
+*.bin
+*.safetensors
+
+# Logs
+*.log
+nohup.out
+download_*.out
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Package files
+*.egg-info/
+dist/
+build/
