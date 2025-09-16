@@ -32,17 +32,19 @@ BERT-based encoder for RRWEB session recordings. Uses custom RRWeb tokenizer wit
 ### Production Training Configuration
 ```python
 {
-    'batch_size': 32,  # Reduced from 64 to prevent OOM on 80GB GPU
+    'batch_size': 32,  # Optimized for H100 80GB
     'max_length': 2048,
     'learning_rate': 5e-5,
-    'warmup_steps': 10000,
-    'max_steps': 1000000,
-    'gradient_accumulation_steps': 4,
-    'fp16': True,
-    'gradient_checkpointing': True,
+    'weight_decay': 0.01,
+    'mlm_probability': 0.15,
+    'num_workers': 4,
+    'cache_size': 2000,  # LRU cache size
+    'train_files': 28750,  # 90% of 31,951 files
+    'val_files': 3195,     # 10% of 31,951 files
+    'samples_per_epoch': 90000,  # Random windows per epoch
     'use_random_window': True,
-    'samples_per_epoch': 90000,
-    'num_workers': 4
+    'T_0': 10,  # Cosine annealing restart period
+    'T_mult': 2,  # Period multiplier after restart
 }
 ```
 
@@ -66,44 +68,59 @@ cd /home/ubuntu/rrweb_tokenizer
 pip install -r requirements.txt
 ```
 
-### Pretraining with MLM
+### Production Training
 
 ```bash
-python train_rrweb_bert.py \
-    --data_dir /home/ubuntu/embeddingV2/rrweb_data \
-    --tokenizer_path /home/ubuntu/rrweb_tokenizer/tokenizer_model_latest \
-    --output_dir ./rrweb-bert-base \
-    --model_size base \
-    --batch_size 8 \
-    --num_epochs 3 \
-    --max_length 2048
+# Run production training with random window sampling
+python production_training.py
+
+# Or run in background with nohup
+nohup python -u production_training.py > production_training.out 2>&1 &
+
+# Monitor training
+tail -f production_training.out
 ```
+
+The production script automatically:
+- Uses random window sampling to prevent bias
+- Loads data from `/home/ubuntu/embeddingV2/rrweb_data`
+- Uses pre-trained tokenizer from `/home/ubuntu/rrweb_tokenizer`
+- Saves checkpoints to `./checkpoints_production/`
+- Logs to WandB project `rrweb-bert-production`
 
 ## Usage
 
 ```python
-from configuration_rrweb import RRWebBERTConfig
-from modeling_rrweb import RRWebBERTModel
+import torch
 import sys
+sys.path.append('/home/ubuntu/rrweb-bert')
 sys.path.append('/home/ubuntu/rrweb_tokenizer')
-from rrweb_tokenizer import RRWebTokenizer
+
+from src.tokenizer_wrapper import TokenizerWrapper
+from production_training import RRWebBERT
 
 # Load tokenizer
-tokenizer = RRWebTokenizer.load('/path/to/tokenizer_model')
+tokenizer = TokenizerWrapper(
+    structural_vocab_path='/home/ubuntu/rrweb_tokenizer/structural_vocab.json',
+    bpe_model_path='/home/ubuntu/rrweb_tokenizer/text_bpe.model'
+)
 
-# Load model
-config = RRWebBERTConfig.from_pretrained('./rrweb-bert-base')
-model = RRWebBERTModel.from_pretrained('./rrweb-bert-base')
+# Load trained model
+checkpoint = torch.load('./checkpoints_production/best_model.pt')
+model = RRWebBERT(vocab_size=12520)
+model.load_state_dict(checkpoint['model_state_dict'])
+model.eval()
 
-# Tokenize RRWEB events
-events = [...]  # Your RRWEB events
+# Tokenize RRWEB session
+with open('session.json', 'r') as f:
+    events = json.load(f)
 tokens = tokenizer.tokenize_session(events)
 
 # Get embeddings
-import torch
-input_ids = torch.tensor([tokens])
-outputs = model(input_ids)
-embeddings = outputs.pooler_output  # [batch_size, hidden_size]
+input_ids = torch.tensor([tokens[:2048]])  # Truncate to max length
+with torch.no_grad():
+    outputs = model(input_ids)
+    embeddings = outputs.loss  # Note: Returns MLM loss in training mode
 ```
 
 ## Integration with Trimodal Model
@@ -157,32 +174,43 @@ model = AutoModel.from_pretrained("HumanBehaviorLabs/HB-rrweb-BERT")
 
 ### Training Optimizations
 1. **Memory Management**:
-   - LRU cache with 1000 file limit
+   - LRU cache with 2000 file limit
    - Lazy loading with on-demand decompression
-   - Random window sampling to avoid loading full sessions
+   - Random window sampling prevents loading full sessions
+   - Mixed precision (FP16) training with GradScaler
 
 2. **Performance**:
    - DataLoader with 4 workers for parallel data loading
    - Pin memory for faster GPU transfer
-   - Gradient accumulation for larger effective batch sizes
+   - Single GPU optimization (avoids DataParallel overhead)
+   - 90,000 samples per epoch for better coverage
 
 3. **Stability**:
    - Gradient clipping at 1.0
-   - Warmup over 10,000 steps
+   - Cosine annealing with warm restarts
    - AdamW optimizer with weight decay 0.01
+   - Validation every epoch for early stopping
 
 ### Known Limitations
 - Maximum sequence length of 2048 tokens
 - Requires preprocessing RRWEB events to extract text and structure
-- Single GPU training (DataParallel not supported with small batch sizes)
+- Single GPU training (DataParallel hangs with batch_size ≤ num_gpus)
+- Random window sampling may split semantic boundaries
+
+### Production Training Details
+- **Dataset**: 31,951 RRWEB session files from real user interactions
+- **Training Strategy**: Random window sampling to see diverse parts of sessions
+- **Validation**: 10% holdout for model selection
+- **Hardware**: Single NVIDIA H100 80GB GPU
+- **Training Time**: ~2-3 days for 10 epochs
 
 ## Citation
 
 ```bibtex
-@software{rrweb_bert,
-  title = {RRWebBERT: BERT for Web Session Recordings},
-  author = {Your Name},
-  year = {2024},
-  url = {https://github.com/your-username/rrweb-bert}
+@software{hb-rrweb_bert,
+  title = {HB-RRWebBERT: BERT for Web Session Recordings},
+  author = {Aneesh Muppidi},
+  year = {2025},
+  url = {https://github.com/humanbehavior-gh/HB-rrweb-BERT}
 }
 ```
